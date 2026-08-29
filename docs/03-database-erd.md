@@ -1,210 +1,239 @@
-# Zarvan Gold — Database Design & ERD (MySQL 8 / Laravel migrations)
+# Zarvan Gold — Backend API Specification · Part 3: Database Design & ERD
 
-Conventions: InnoDB, utf8mb4_unicode_ci, unsigned bigint auto-increment PKs named `id`, `created_at`/`updated_at` on every table, soft deletes where marked, all money `BIGINT` rials, all mass `BIGINT` mg, UTC timestamps.
+> Engine: **MySQL 8 / InnoDB**, charset `utf8mb4`, collation `utf8mb4_unicode_ci`.
+> All money/weight columns are `BIGINT` integers (IRR rials / mg). All tables have
+> `id BIGINT UNSIGNED AUTO_INCREMENT PK`, `created_at`, `updated_at` unless noted.
+> Soft delete (`deleted_at`) only where marked. Timestamps are UTC.
 
-## 1. Entity-relationship diagram
+## 1. ERD (Mermaid)
 
 ```mermaid
 erDiagram
-    users ||--o{ wallets : has
-    users ||--o| notification_preferences : has
-    users ||--o{ addresses : has
-    users ||--o| kyc_submissions : submits
-    kyc_submissions ||--|{ kyc_documents : contains
-    users ||--o{ referrals : "invites (referrer)"
+    users ||--o{ wallets : "has 2"
+    users ||--o{ wallet_ledger : "writes"
+    users ||--o{ addresses : owns
+    users ||--o| kyc_profiles : "1:1"
+    kyc_profiles ||--o{ kyc_documents : has
+    kyc_profiles ||--o{ kyc_events : history
+    users ||--o{ otp_codes : receives
+    users ||--o{ sessions : has
+    users }o--o| users : "referred_by"
     users ||--o{ referral_rewards : earns
+    users ||--o| notification_preferences : "1:1"
     users ||--o{ notifications : receives
     users ||--o{ tickets : opens
-    tickets ||--|{ ticket_messages : thread
-    users ||--o{ orders : places
-    users ||--|{ cart_lines : "active cart"
-    users ||--o{ trades : fills
+    tickets ||--o{ ticket_messages : thread
     users ||--o{ trade_quotes : requests
-    users ||--o{ portfolio_lots : holds
+    trade_quotes ||--o| trades : "fills 1:1"
+    users ||--o{ trades : executes
+    trades ||--o{ portfolio_lots : "buy creates / sell consumes"
     users ||--o{ auto_invest_plans : schedules
-    users ||--o{ installment_contracts : signs
+    users ||--o{ installment_contracts : owes
     installment_contracts ||--o{ installment_payments : repays
-    users ||--o{ buyback_requests : requests
-    users ||--o{ price_alerts : sets
-    users ||--o{ gift_cards : "sends/receives"
-    users ||--o{ wishlists : pins
-    users ||--o{ audit_logs : "acts (staff/admin)"
-    users ||--o{ staff_invites : invited
-    users ||--o{ withdraw_requests : withdraws
-    users ||--o{ delivery_requests : requests
-    categories ||--o{ products : groups
-    categories ||--o{ categories : "parent/child"
-    products ||--o{ product_media : media
-    products ||--|{ inventory_movements : moves
-    products ||--o{ vault_lots : "vaulted as"
-    products ||--o{ restock_subscriptions : watched
+    users ||--o{ buyback_requests : submits
+    users ||--o{ carts : "1 active"
+    carts ||--o{ cart_lines : contains
     cart_lines }o--|| products : references
-    orders ||--|{ order_items : contains
-    orders ||--o| shipments : fulfills
-    shipments ||--|{ shipment_events : tracks
-    orders ||--o| payments : paid_by
-    orders ||--o| invoices : bills
-    trades ||--o| invoices : bills
-    payments ||--o{ payment_refunds : refunded
-    coupons ||--o{ coupon_redemptions : redeemed
-    users ||--o{ coupon_redemptions : uses
-    spot_price_snapshots }o--|| price_feeds : sourced
-    price_alerts }o--|| users : owned
-    broadcasts ||--o{ notifications : fans_out
+    products }o--|| categories : belongs
+    categories ||--o{ categories : "parent (max 2 lvl)"
+    products ||--o{ files : "images/360"
+    products ||--o{ inventory_movements : stock history
+    products ||--o{ wishlist_items : saved
+    users ||--o{ wishlist_items : saves
+    users ||--o{ orders : places
+    orders ||--o{ order_items : contains
+    order_items }o--|| products : references
+    orders ||--o| shipments : "1:1 (delivery)"
+    shipments ||--o{ shipment_events : timeline
+    orders ||--o{ payments : "1:n (attempts)"
+    payments ||--o{ payment_refunds : refunds
+    orders ||--o| invoices : "1:1 on paid"
+    orders }o--o| coupons : redeems
+    coupons ||--o{ coupon_redemptions : tracks
+    users ||--o{ gift_cards : sends
+    users ||--o{ delivery_requests : "vault→physical"
+    users ||--o{ dealer_orders : "wholesale"
+    users ||--o{ reservations : reserves
+    price_snapshots ||--o{ price_alert_triggers : fires
+    users ||--o{ price_alerts : sets
+    settings ||--|| settings : singleton
+    vault_lots ||--o{ vault_lots : "physical gold"
+    users ||--o{ audit_logs : actor
+    users ||--o{ staff_invites : invited
+    users ||--o{ size_profiles : "ring/bracelet"
+    contact_messages ||--o{ contact_messages : inbox
+    treasury_ledger ||--o{ treasury_ledger : "double-entry mirror"
 ```
 
 ## 2. Table definitions
 
-### 2.1 Identity & profile
+### Identity & auth
 
-**`users`** — every actor (customer/dealer/staff/admin). Soft deletes.
+**`users`** — every account (customer, dealer, staff, admin).
 | Column | Type | Null | Default / Notes |
 |---|---|---|---|
-| id | bigint u | NO | PK |
-| name | varchar(120) | YES | null until set (OTP register) |
-| mobile | char(11) | NO | **UNIQUE**, ASCII-normalized `09xxxxxxxxx` |
-| email | varchar(160) | YES | UNIQUE when set |
-| password | varchar(255) | YES | bcrypt; nullable for OTP-only users |
-| role | enum('customer','dealer','staff','admin') | NO | 'customer'; INDEX |
-| kyc_status | enum('unverified','pending','approved','rejected') | NO | 'unverified'; INDEX |
-| referral_code | varchar(16) | YES | UNIQUE, generated `ZARV-XXXX` |
-| referred_by_id | bigint u | YES | FK→users.id |
-| is_active | tinyint(1) | NO | 1 (staff deactivation) |
-| preferred_size_mm | smallint u | YES | size-guide save (SizeGuidePage) |
-| timestamps, softDeletes | | | |
+| `name` | VARCHAR(120) | ✔ | null until set (OTP-first signup) |
+| `mobile` | CHAR(11) | ✘ | **UNIQUE**, `09xxxxxxxxx` |
+| `email` | VARCHAR(190) | ✔ | UNIQUE when set |
+| `password_hash` | VARCHAR(255) | ✔ | bcrypt, null for OTP-only users |
+| `role` | ENUM('customer','dealer','staff','admin') | ✘ | `'customer'` |
+| `kyc_status` | ENUM('unverified','pending','approved','rejected') | ✘ | `'unverified'` |
+| `referral_code` | VARCHAR(16) | ✔ | UNIQUE, `ZARV-XXXX` |
+| `referred_by_id` | BIGINT UNSIGNED | ✔ | FK→users.id |
+| `is_active` | TINYINT(1) | ✘ | 1 (staff deactivation) |
+| `last_login_at` | TIMESTAMP | ✔ | |
+| `deleted_at` | TIMESTAMP | ✔ | soft delete (admin) |
 
-**`auth_otps`** — `id, mobile char(11) INDEX, purpose enum('login','withdraw','trade','reset'), code_hash varchar(64), attempts tinyint DEFAULT 0, expires_at datetime, consumed_at datetime NULL, created_at`. Unique active per (mobile,purpose): replace-on-send.
+Indexes: `uniq(mobile)`, `uniq(referral_code)`, `idx(role, kyc_status)`, `idx(referred_by_id)`.
 
-**`addresses`** — `id, user_id FK INDEX, title varchar(60), province varchar(60), city varchar(60), line1 varchar(255), postal_code char(10), is_default tinyint(1) DEFAULT 0, timestamps`. (One default per user enforced in app transaction.)
+**`sessions`** — refresh tokens. `user_id FK`, `token_hash CHAR(64) UNIQUE`, `ip`, `user_agent`, `expires_at`, `revoked_at ✔`. `idx(user_id)`, `idx(token_hash)`.
 
-**`notification_preferences`** — 1:1. `id, user_id FK UNIQUE, sms tinyint(1) DEFAULT 1, email tinyint(1) DEFAULT 1, in_app tinyint(1) DEFAULT 1, price_alerts tinyint(1) DEFAULT 1, timestamps`.
+**`otp_codes`** — `user_id ✔ FK (null pre-registration)`, `mobile CHAR(11)`, `purpose ENUM('login','withdraw','trade')` (default login), `code_hash CHAR(64)`, `expires_at`, `attempts TINYINT default 0`, `consumed_at ✔`. `idx(mobile, purpose, consumed_at)`. TTL 5 min (login) / 3 min (step-up).
 
-**`kyc_submissions`** — `id, user_id FK INDEX, status enum('pending','approved','rejected') DEFAULT 'pending', submitted_at datetime NULL, reviewed_at datetime NULL, reviewer_id FK→users NULL, reject_reason varchar(500) NULL, timestamps`. Latest per user is current.
+### KYC
 
-**`kyc_documents`** — `id, kyc_submission_id FK CASCADE, doc_type enum('id_front','id_back','selfie'), upload_id FK→uploads, timestamps`.
+**`kyc_profiles`** — 1:1 with users. `user_id UNIQUE FK`, `first_name`, `last_name`, `national_id CHAR(10) UNIQUE`, `birth_date DATE`, `status` mirrors users.kyc_status (denormalized for queue queries), `submitted_at ✔`, `reviewed_by_id ✔ FK→users`, `reviewed_at ✔`, `reject_reason VARCHAR(500) ✔`.
 
-**`uploads`** — `id, user_id FK, type enum('kyc_document','product_image','product_360','buyback_photo','avatar'), disk varchar(20), path varchar(255), mime varchar(60), bytes int u, timestamps`. Private disk for KYC.
+**`kyc_documents`** — `kyc_profile_id FK`, `kind ENUM('id_card','national_card','selfie')`, `file_id FK→files`, `superseded_at ✔` (replacement keeps history). `uniq(kyc_profile_id, kind)` on non-superseded.
 
-**`staff_invites`** — `id, mobile char(11), role enum('staff','admin'), invited_by FK→users, accepted_at NULL, timestamps`.
+**`kyc_events`** — append-only: `kyc_profile_id FK`, `event ENUM('submitted','approved','rejected','resubmitted')`, `actor_id ✔ FK`, `reason ✔`, `at TIMESTAMP`. Feeds the KycPage timeline + staff audit.
 
-**`audit_logs`** — `id, actor_id FK→users NULL, action varchar(60) INDEX (e.g. `wallet.adjust`, `pricing.halt`), subject_type varchar(40), subject_id bigint, payload JSON, ip varchar(45), created_at INDEX`. Append-only.
+### Money
 
-### 2.2 Money & gold
+**`wallets`** — `user_id FK`, `currency ENUM('irr','gold_mg')`, `balance BIGINT` (≥ 0 enforced in app + CHECK), `version INT` (optimistic lock), `updated_at`. `uniq(user_id, currency)`. Exactly two rows per user, created at registration.
 
-**`wallets`** — one per (user, currency). `id, user_id FK, currency enum('irr','gold_mg'), balance BIGINT DEFAULT 0 (CHECK ≥ 0), updated_at`. UNIQUE(user_id, currency). Balance updated only inside ledger transaction (double-write consistency).
+**`wallet_ledger`** — append-only double-entry source of truth.
+`user_id FK`, `wallet_id FK`, `direction ENUM('credit','debit')`, `amount BIGINT (>0)`, `reason VARCHAR(190)` (Persian, UI-shown), `balance_after BIGINT`, `reference_type ENUM('deposit','withdraw','trade','order','gift','auto_invest','installment','referral','adjustment','buyback','delivery_fee')`, `reference_id BIGINT ✔` (polymorphic by reference_type). `idx(user_id, wallet_id, id DESC)`, `idx(reference_type, reference_id)`. **Invariant:** last `balance_after` per wallet == `wallets.balance` (nightly reconcile job).
 
-**`wallet_ledgers`** — append-only, immutable. `id, wallet_id FK INDEX, user_id FK INDEX (denorm for scope), direction enum('credit','debit'), amount BIGINT, balance_after BIGINT, reason varchar(120), reference_type varchar(40) NULL (order|trade|deposit|withdraw|gift|adjustment|installment|buyback), reference_id bigint NULL, created_at INDEX`. Composite INDEX(user_id, created_at DESC) — powers WalletPage.
+**`treasury_ledger`** — company-side mirror for adjustments/refunds: `direction`, `amount`, `currency`, `reason`, `ref_type`, `ref_id`, `actor_id`.
 
-**`withdraw_requests`** — `id, user_id FK, amount_irr BIGINT, iban char(26), otp_verified_at datetime, status enum('processing','settled','failed') DEFAULT 'processing', settled_at NULL, timestamps`.
+**`payments`** — `user_id FK`, `order_id ✔ FK` (null for pure deposits), `amount_irr BIGINT`, `driver VARCHAR(40)` (settings.psp), `status ENUM('pending','paid','failed','cancelled')`, `authority VARCHAR(64) ✔` (PSP token), `ref_id VARCHAR(64) ✔ UNIQUE` (PSP reference, webhook idempotency), `purpose ENUM('order','deposit','installment','delivery_fee')`, `paid_at ✔`, `failed_reason ✔`. `idx(status)`, `idx(order_id)`.
 
-### 2.3 Catalog & inventory
+**`payment_refunds`** — `payment_id FK`, `amount_irr`, `reason VARCHAR(500)`, `status ENUM('processing','done','failed')`, `ref_id ✔`, `actor_id FK`, `processed_at ✔`.
 
-**`categories`** — `id, parent_id FK→categories NULL INDEX, name varchar(80), slug varchar(100) UNIQUE, type enum('jewelry','bullion','melted'), sort_order int DEFAULT 0, is_active tinyint(1) DEFAULT 1, timestamps`.
+### Pricing & trading
 
-**`products`** — soft deletes. `id, sku varchar(32) UNIQUE (e.g. BR-18-221), slug varchar(140) UNIQUE, name varchar(160) INDEX, type enum('jewelry','bar','coin','melted') INDEX, category_id FK, karat enum('18','24') INDEX, weight_mg BIGINT, making_charge_type enum('flat','per_gram'), making_charge_irr BIGINT DEFAULT 0, occasion varchar(40) NULL INDEX (هدیه/نامزدی/…), status enum('draft','active','inactive','out_of_stock') INDEX, description text NULL, attributes JSON NULL, has_360 tinyint(1) DEFAULT 0, stock_on_hand int DEFAULT 0, reorder_point int DEFAULT 5, published_at datetime NULL, timestamps, deleted_at`. Fulltext INDEX(name, sku) for `q`.
+**`price_snapshots`** — feed + manual ticks. `karat TINYINT (18|24)`, `price_irr_per_gram BIGINT`, `source ENUM('feed','manual')`, `observed_at TIMESTAMP` (indexed), `created_by ✔ FK` (manual). `idx(karat, observed_at)`; partition monthly after 1 year. Powers C1/C2/C3, quotes, portfolio mark-to-market.
 
-**`product_media`** — `id, product_id FK CASCADE INDEX, upload_id FK, kind enum('photo','frame_360'), sort_order smallint DEFAULT 0, timestamps`. 360 = ordered frames ≤36.
+**`price_alerts`** — `user_id FK`, `karat`, `direction ENUM('above','below')`, `threshold_irr BIGINT`, `is_active TINYINT(1) default 1`, `last_triggered_at ✔`. `idx(user_id)`, `idx(is_active, karat)` for evaluator job. Max 20 active/user (app).
 
-**`inventory_movements`** — `id, product_id FK INDEX, delta int (signed), qty_after int, reason enum('sale','restock','manual','order_reserve','release','vault_in','vault_out'), ref_type varchar(30) NULL, ref_id bigint NULL, by_user_id FK NULL, created_at INDEX`.
+**`price_alert_triggers`** — append-only: `alert_id FK`, `snapshot_id FK`, `at`. Dedup: 1 trigger per alert per 24 h.
 
-**`vault_lots`** — `id, product_id FK NULL (bars) , karat enum('18','24'), weight_mg BIGINT, ref varchar(60) (supplier/serial), supplier varchar(120), received_at datetime, status enum('in_vault','dispatched') DEFAULT 'in_vault', timestamps`. Solvency numerator = Σ in_vault (+ melted pool); liabilities = Σ customer gold wallets + vaulted order items.
+**`trade_quotes`** — `user_id FK`, `side ENUM('buy','sell')`, `weight_mg BIGINT`, `spot_irr BIGINT`, `spread_bps INT`, `irr_amount BIGINT`, `status ENUM('active','filled','expired','cancelled')` default active, `expires_at` (= created + settings.quote_ttl_sec). `idx(user_id, status)`, `idx(expires_at, status)` (expiry sweeper).
 
-**`restock_subscriptions`** — `id, user_id FK, product_id FK, created_at`. UNIQUE(user,product).
+**`trades`** — `user_id FK`, `quote_id UNIQUE FK`, `side`, `status ENUM('filled','rejected')`, `weight_mg`, `irr_amount`, `spot_irr`, `slippage_bps INT default 0`, `reject_reason ✔`, `filled_at ✔`. `idx(user_id, filled_at DESC)`.
 
-### 2.4 Pricing
+**`buyback_requests`** — `user_id FK`, `source ENUM('wallet','physical')`, `weight_mg`, `notes VARCHAR(1000) ✔`, `photo_url VARCHAR(500) ✔`, `status ENUM('pending_review','assaying','approved','paid','rejected')`, `final_weight_mg ✔`, `final_irr ✔`, `reviewer_id ✔ FK`, `decided_at ✔`.
 
-**`price_feeds`** — `id, provider varchar(40), karat enum('18','24'), status tinyint(1) DEFAULT 1, timestamps`.
+### Catalog & inventory
 
-**`spot_price_snapshots`** — `id, karat enum('18','24') INDEX, source enum('feed','manual'), price_irr_per_gram BIGINT, bid_irr BIGINT, ask_irr BIGINT, observed_at datetime INDEX, created_at`. Composite INDEX(karat, observed_at DESC) → history queries + staleness (`SELECT observed_at ORDER BY id DESC LIMIT 1`). Partition by month recommended (1Y charts).
+**`categories`** — `parent_id ✔ FK→categories` (depth ≤ 2), `name VARCHAR(80)`, `slug VARCHAR(100) UNIQUE`, `type ENUM('jewelry','bullion','melted')`, `sort_order INT default 0`, `is_active TINYINT(1) default 1`. `idx(parent_id, sort_order)`.
 
-**`pricing_events`** — audit of manual spot/spread/halt: `id, actor_id FK, kind enum('spot','spread','halt'), payload JSON, created_at`.
+**`products`** — the §4.3 Product persisted.
+`sku VARCHAR(32) UNIQUE`, `slug VARCHAR(140) UNIQUE`, `name VARCHAR(140)`, `type ENUM('jewelry','bar','coin','melted')`, `category_id FK`, `karat TINYINT (18|24)`, `weight_mg BIGINT`, `making_charge_type ENUM('flat','per_gram')`, `making_charge_irr BIGINT default 0`, `occasion VARCHAR(40) ✔`, `status ENUM('draft','active','inactive','out_of_stock')` default draft, `description TEXT ✔`, `attributes JSON ✔`, `has_360 TINYINT(1) default 0`, `stock_on_hand INT default 0` (melted: virtual ∞ = 99 999 999), `reserved INT default 0`, `reorder_point INT default 0`, `published_at ✔`, `deleted_at ✔` (soft; blocked if referenced by orders).
+Indexes: `idx(status, published_at)`, `idx(type, karat)`, `idx(category_id)`, FULLTEXT(`name, sku, description`).
 
-**`price_alerts`** — `id, user_id FK INDEX, karat enum('18','24'), direction enum('above','below'), threshold_irr BIGINT, is_active tinyint(1) DEFAULT 1, last_fired_at NULL, timestamps`.
+**`files`** — media registry: `disk VARCHAR(20)`, `path VARCHAR(500)`, `mime VARCHAR(60)`, `size_bytes INT`, `kind ENUM('image','frame360','kyc','buyback_photo','invoice_pdf')`, `context_type VARCHAR(40) ✔` (product/kyc/…), `context_id ✔`, `sort INT default 0`, `uploaded_by FK`. `idx(context_type, context_id, sort)`.
 
-### 2.5 Trading
+**`inventory_movements`** — append-only stock log: `product_id FK`, `delta INT` (+/−), `reason ENUM('purchase','sale','reservation','cancel_release','adjustment','return')`, `actor_id ✔ FK`, `note ✔`, `at`. `idx(product_id, at)`.
 
-**`trade_quotes`** — `id, user_id FK INDEX, side enum('buy','sell'), weight_mg BIGINT, spot_irr BIGINT (snapshot), spread_bps int, irr_amount BIGINT, expires_at datetime, status enum('open','confirmed','expired','rejected') DEFAULT 'open', created_at`.
+**`vault_lots`** — physical vault bars: `serial VARCHAR(40) UNIQUE`, `weight_mg BIGINT`, `cost_irr BIGINT`, `karat TINYINT default 24`, `supplier VARCHAR(120) ✔`, `acquired_at`, `allocated_mg BIGINT default 0` (customer-allocated portion). Solvency numerator = Σ(weight_mg) scaled to 18k-equivalent.
 
-**`trades`** — `id, user_id FK INDEX, quote_id FK NULL, side enum('buy','sell') INDEX, status enum('filled','rejected'), weight_mg BIGINT, irr_amount BIGINT, spot_irr BIGINT, slippage_bps int NULL, reject_reason varchar(200) NULL, filled_at datetime NULL, created_at INDEX`.
+**`wishlist_items`** — `user_id FK`, `product_id FK`, `created_at`. `uniq(user_id, product_id)`. *(Spec item; UI not wired yet — see audit.)*
 
-**`portfolio_lots`** — FIFO. `id, user_id FK INDEX, acquired_at datetime, source enum('trade','order','gift','auto_invest'), source_id bigint NULL, weight_mg BIGINT (remaining), cost_irr BIGINT, consumed_at NULL`. market_irr computed live (not stored).
+**`reservations`** — deposit holds: `user_id FK`, `product_id FK`, `deposit_irr`, `size VARCHAR(10) ✔`, `status ENUM('pending_deposit','active','converted','expired','cancelled')`, `expires_at` (72 h), `payment_id ✔ FK`.
 
-**`auto_invest_plans`** — `id, user_id FK INDEX, amount_irr BIGINT, day_of_month tinyint (1..28), is_active tinyint(1) DEFAULT 1, last_run_at NULL, next_run_at datetime NULL, timestamps`.
+**`size_profiles`** — `user_id FK`, `kind ENUM('ring','bracelet')`, `size_ir INT ✔`, `size_mm DECIMAL(4,1) ✔`, `size_us VARCHAR(4) ✔`, `updated_at`. `uniq(user_id, kind)`.
 
-**`installment_contracts`** — `id, user_id FK INDEX, months tinyint, down_irr BIGINT, principal_irr BIGINT, paid_irr BIGINT DEFAULT 0, remaining_irr BIGINT (generated), status enum('active','completed','defaulted') DEFAULT 'active', started_at, timestamps`.
+### Commerce
 
-**`installment_payments`** — `id, installment_contract_id FK CASCADE, amount_irr BIGINT, paid_at datetime, payment_id FK→payments NULL`.
+**`carts`** — `user_id FK`, `status ENUM('active','converted','abandoned')`, `coupon_id ✔ FK`, `coupon_code VARCHAR(24) ✔` (denorm for display), `subtotal_irr BIGINT default 0`, `discount_irr default 0`, `total_irr default 0`, `quote_locked_at ✔`, `quote_expires_at ✔`. `idx(user_id, status)` — partial unique on `(user_id)` where `status='active'` (app-enforced).
 
-**`buyback_requests`** — `id, user_id FK, source enum('wallet','physical'), weight_mg BIGINT, notes varchar(500) NULL, photo_upload_id FK NULL, status enum('pending','appraised','settled','rejected') DEFAULT 'pending', offer_irr NULL, timestamps`.
+**`cart_lines`** — `cart_id FK`, `product_id FK`, `qty INT (≥1)`, `packaging ENUM('standard','luxury') default 'standard'`, `unit_quote_irr BIGINT` (price snapshot at add; re-quoted on checkout lock). `uniq(cart_id, product_id)` (merge rule).
 
-### 2.6 Commerce
+**`coupons`** — `code VARCHAR(24) UNIQUE`, `type ENUM('percent','fixed_irr')`, `value BIGINT`, `max_uses INT ✔`, `uses_count INT default 0`, `min_order_irr BIGINT ✔ default 0`, `expires_at ✔`, `is_active TINYINT(1) default 1`. `idx(code, is_active)`.
 
-**`cart_lines`** — active cart per user (no separate carts table needed; `carts` optional for analytics). `id, user_id FK INDEX, product_id FK, qty smallint u DEFAULT 1, packaging enum('standard','luxury') DEFAULT 'standard', unit_quote_irr BIGINT (locked at add, refreshed on read), added_at`. UNIQUE(user_id, product_id, packaging) → qty merge. Abandoned = `added_at` older than 24h with no order (report-only; `CartStatus` in UI is derived).
+**`coupon_redemptions`** — pivot `coupon_id FK`, `user_id FK`, `order_id FK`, `discount_irr`, `redeemed_at`. `uniq(user_id, coupon_id)` (one use per user, v1).
 
-**`orders`** — `id, user_id FK INDEX, number varchar(24) UNIQUE (ZRVORD-2026-0901), status enum('draft','awaiting_payment','paid','reserved','processing','vaulted','shipped','delivered','cancelled','refunded') INDEX, fulfillment enum('vault','delivery'), address_id FK NULL, subtotal_irr BIGINT, making_irr BIGINT, discount_irr BIGINT DEFAULT 0, coupon_id FK NULL, tax_irr BIGINT, total_irr BIGINT, gold_mg BIGINT, notes varchar(300) NULL, paid_at NULL, cancelled_at NULL, cancel_reason NULL, timestamps`. INDEX(user_id, created_at DESC); INDEX(status).
+**`orders`** — `user_id FK`, `number VARCHAR(20) UNIQUE` (`ZRVORD-YYYY-####`), `status ENUM('draft','awaiting_payment','paid','reserved','processing','vaulted','shipped','delivered','cancelled','refunded')`, `fulfillment ENUM('vault','delivery')`, `address_id ✔ FK` (delivery), `coupon_id ✔ FK`, `subtotal_irr`, `making_irr`, `packaging_irr default 0`, `discount_irr`, `tax_irr`, `delivery_fee_irr default 0`, `total_irr`, `gold_mg BIGINT`, `paid_at ✔`, `cancelled_at ✔`, `cancel_reason ✔`. Indexes: `idx(user_id, created_at DESC)`, `idx(status)`, `idx(created_at)` (dashboards/funnel).
 
-**`order_items`** — `id, order_id FK CASCADE INDEX, product_id FK, cart_line_id NULL, qty smallint, unit_price_irr BIGINT, making_irr BIGINT, packaging enum, weight_mg BIGINT, vaulted tinyint(1) DEFAULT 0, timestamps`.
+**`order_items`** — `order_id FK`, `product_id FK`, `sku VARCHAR(32)` (frozen), `name VARCHAR(140)` (frozen), `qty INT`, `packaging`, `unit_quote_irr`, `making_irr`, `weight_mg` (frozen per-unit).
 
-**`shipments`** — `id, order_id FK UNIQUE NULL, carrier varchar(60), tracking_code varchar(60) UNIQUE, status varchar(40) DEFAULT 'label_created', shipped_at NULL, delivered_at NULL, timestamps`.
+**`shipments`** — 1:1 with delivery orders. `order_id UNIQUE FK`, `carrier VARCHAR(60)`, `tracking_code VARCHAR(40)`, `status ENUM('preparing','shipped','in_transit','delivered','returned')`, `shipped_at ✔`, `delivered_at ✔`.
 
-**`shipment_events`** — `id, shipment_id FK CASCADE INDEX, label varchar(120), at datetime, source enum('carrier','staff')`. (Powers Timeline; 1:N.)
+**`shipment_events`** — timeline: `shipment_id FK`, `label VARCHAR(140)` (Persian, shown verbatim), `at`. `idx(shipment_id, at)`.
 
-**`payments`** — `id, user_id FK INDEX, order_id FK NULL INDEX, amount_irr BIGINT, driver varchar(30) (sandbox-psp|wallet|card), status enum('pending','paid','failed','cancelled','refunded') INDEX, authority varchar(100) NULL, ref_id varchar(60) NULL, paid_at NULL, created_at INDEX`.
+**`invoices`** — `order_id UNIQUE FK`, `user_id FK`, `number VARCHAR(20) UNIQUE` (`ZRV-YYYY-#####`), `issued_at`, `subtotal_irr`, `discount_irr`, `vat_irr`, `total_irr`, `gold_mg`, `legal_name VARCHAR(140)` (frozen from settings), `legal_reg_no VARCHAR(40)` (frozen), `pdf_file_id ✔ FK→files`.
 
-**`payment_refunds`** — `id, payment_id FK, amount_irr BIGINT, reason varchar(300), by_user_id FK, created_at`. Σ ≤ paid amount (check in app).
+**`delivery_requests`** — vault→physical: `user_id FK`, `gold_mg`, `address_id FK`, `fee_irr`, `status ENUM('pending','scheduled','dispatched','delivered','rejected')`, `shipment_id ✔ FK`, `requested_at`, `dispatched_at ✔`. Min 5000 mg, KYC approved (app rule).
 
-**`invoices`** — `id, user_id FK INDEX, number varchar(24) UNIQUE (ZRV-2026-00012), order_id FK NULL, trade_id FK NULL, issued_at datetime INDEX, total_irr BIGINT, gold_mg BIGINT, voided_at NULL, pdf_path varchar(255) NULL (generated lazily), timestamps`.
+### Investment products
 
-**`delivery_requests`** — vault→physical. `id, user_id FK, weight_mg BIGINT, address_id FK, bar_preference enum('5g','10g','50g','any') DEFAULT 'any', status enum('pending','processing','shipped','delivered') DEFAULT 'pending', shipment_id FK NULL, timestamps`.
+**`portfolio_lots`** — FIFO cost basis: `user_id FK`, `trade_id ✔ FK` (origin), `weight_mg` (remaining), `cost_irr` (remaining cost), `acquired_at`. `idx(user_id, acquired_at)`. Sell consumes oldest lots; `weight_mg=0` rows kept for history.
 
-**`gift_cards`** — `id, sender_id FK INDEX, recipient_mobile char(11) INDEX, recipient_id FK NULL (on redeem), code varchar(16) UNIQUE (GFT-…), gold_mg BIGINT, status enum('created','sent','redeemed') INDEX, packaging enum('standard','luxury'), message varchar(300) NULL, redeemed_at NULL, timestamps`.
+**`auto_invest_plans`** — `user_id FK`, `amount_irr`, `day_of_month TINYINT (1–28)`, `is_active TINYINT(1)`, `last_run_at ✔`, `next_run_at ✔`. `idx(is_active, next_run_at)`.
 
-**`coupons`** — soft deletes. `id, code varchar(32) UNIQUE (GOLD-NOWRUZ), type enum('percent','fixed_irr'), value BIGINT (percent 1..90 | rials), max_uses int NULL, uses_count int DEFAULT 0, min_order_irr BIGINT NULL, expires_at NULL, is_active tinyint(1) DEFAULT 1, timestamps`.
+**`installment_contracts`** — `user_id FK`, `months TINYINT`, `down_irr`, `principal_irr`, `paid_irr default 0`, `remaining_irr` (= principal − paid, maintained), `status ENUM('active','completed','overdue','cancelled')`, `next_due_at ✔`, `order_id ✔ FK` (financed purchase).
 
-**`coupon_redemptions`** — pivot user↔coupon. `id, coupon_id FK, user_id FK, order_id FK NULL, discount_irr BIGINT, created_at`. UNIQUE(coupon_id, user_id) when single-use per user (v1: always).
+**`installment_payments`** — `contract_id FK`, `payment_id FK`, `amount_irr`, `paid_at`.
 
-### 2.7 Support, notifications, promos
+**`gift_cards`** — `sender_id FK`, `recipient_user_id ✔ FK` (resolved by mobile if registered), `recipient_mobile CHAR(11)`, `code VARCHAR(16) UNIQUE` (`ZGIFT-XXXXX`), `gold_mg`, `packaging ENUM('standard','luxury')`, `message VARCHAR(200) ✔`, `status ENUM('created','sent','redeemed')`, `redeemed_at ✔`. `idx(sender_id)`, `idx(recipient_mobile)`.
 
-**`tickets`** — `id, user_id FK INDEX, subject varchar(160), type enum('general','price_match','delivery','kyc'), status enum('open','pending','closed') INDEX, priority enum('low','normal','high') DEFAULT 'normal', assignee_id FK→users NULL INDEX, updated_at INDEX, timestamps`.
+**`referral_rewards`** — `referrer_id FK`, `referee_id FK`, `gold_mg`, `status ENUM('pending','paid')` (paid on referee KYC approval), `paid_at ✔`, `ledger_id ✔ FK`.
 
-**`ticket_messages`** — `id, ticket_id FK CASCADE INDEX, author_id FK→users, is_staff tinyint(1), body text, created_at`.
+### Support & comms
 
-**`notifications`** — `id, user_id FK INDEX, type varchar(40) INDEX, title varchar(160), body text, data JSON NULL, read_at datetime NULL, created_at INDEX`. Composite INDEX(user_id, read_at, created_at DESC) for unread count.
+**`tickets`** — `user_id FK`, `assignee_id ✔ FK→users (staff)`, `subject VARCHAR(120)`, `type ENUM('general','price_match','delivery','kyc')`, `status ENUM('open','pending','closed')`, `priority ENUM('low','normal','high')`, `order_id ✔ FK` (context), `closed_at ✔`, `updated_at`. `idx(status, updated_at)` (staff queue), `idx(user_id)`.
 
-**`broadcasts`** — `id, title varchar(160), body text, channels JSON, queued_count int, by_user_id FK, created_at`.
+**`ticket_messages`** — `ticket_id FK`, `author_id FK`, `is_staff TINYINT(1)` (derived from author role at write), `body TEXT`. `idx(ticket_id, id)`.
 
-**`referrals`** — `id, referrer_id FK INDEX, referee_id FK UNIQUE, joined_at datetime, first_trade_at NULL`.
+**`notifications`** — `user_id FK`, `type ENUM('trade','price','order','promo','system','kyc','gift')`, `title VARCHAR(120)`, `body VARCHAR(500)`, `data JSON ✔` (click-through links), `read_at ✔`, `channel_flags JSON ✔` (sms/email queued). `idx(user_id, read_at, id DESC)` (bell + unread count).
 
-**`referral_rewards`** — `id, referral_id FK, referrer_id FK INDEX, gold_mg BIGINT, status enum('pending','paid') DEFAULT 'pending', paid_at NULL`.
+**`notification_preferences`** — 1:1: `user_id UNIQUE FK`, `sms TINYINT(1) default 1`, `email default 1`, `in_app default 1`, `price_alerts default 1`.
 
-**`wishlists`** — pivot. `id, user_id FK, product_id FK, created_at`. UNIQUE(user_id, product_id).
+**`contact_messages`** — `name`, `mobile`, `message TEXT`, `ticket_id ✔ FK` (if converted), `handled_at ✔`.
 
-**`contact_messages`** — `id, name varchar(120), mobile char(11), message text, ip varchar(45), created_at`.
+### Admin & system
 
-**`settings`** — singleton JSON row. `id, key varchar(40) UNIQUE DEFAULT 'app', value JSON, updated_by FK NULL, updated_at`. Fields per Part 2 §N14. Version column for optimistic locking on concurrent admin edits.
+**`settings`** — singleton row (id=1). Columns exactly per foundation §11: `bid_bps INT 60`, `ask_bps INT 45`, `quote_ttl_sec INT 18`, `slippage_bps INT 10`, `min_trade_mg INT 100`, `unverified_daily_cap_irr BIGINT 50000000`, `otp_enabled TINYINT(1) 1`, `vat_pct INT 0`, `invoice_legal_name VARCHAR(140)`, `invoice_reg_no VARCHAR(40)`, `psp VARCHAR(40)`, `sms_provider VARCHAR(40)`, `vault_address VARCHAR(255)`, `maintenance TINYINT(1) 0`, `trading_halt TINYINT(1) 0`, plus `dealer_spread_bps INT 25`, `luxury_packaging_irr BIGINT 1500000`, `delivery_fee_irr BIGINT 2500000`, `referral_reward_mg INT 1200`, `gift_min_mg INT 100`, `buyback_min_mg INT 500`.
+
+**`staff_invites`** — `mobile`, `name`, `role ENUM('staff','admin')`, `invited_by FK`, `status ENUM('invited','accepted','revoked')`, `user_id ✔ FK` (after accept), `expires_at`.
+
+**`dealer_orders`** — wholesale: `user_id FK (dealer)`, `number VARCHAR(20) UNIQUE` (`ZRVWHL-YYYY-###`), `qty_mg`, `unit_irr` (locked), `total_irr`, `status ENUM('processing','scheduled','delivered','cancelled')`, `requested_delivery_at`, `delivered_at ✔`, `address_id FK`.
+
+**`audit_logs`** — `actor_id ✔ FK`, `action VARCHAR(60)` (`settings.update`, `wallet.adjust`, `payment.refund`, `trading.halt`, `kyc.approve`, `order.status`, `product.delete`, `role.change`, `stock.adjust`…), `subject_type VARCHAR(40) ✔`, `subject_id ✔`, `payload JSON ✔` (diff/before-after), `ip`, `at`. `idx(actor_id, at)`, `idx(subject_type, subject_id)`. Retention 3 years.
+
+**`migrations_meta` / `failed_jobs` / `job_batches`** — framework tables (Laravel defaults).
 
 ## 3. Relationship summary
 
 | Relation | Type | Via |
 |---|---|---|
-| user → wallets | 1:2 (irr + gold_mg) | wallets.user_id |
-| user → notification_preferences | 1:1 | UNIQUE(user_id) |
-| user → active cart | 1:1 (logical) | cart_lines.user_id |
-| category → products | 1:N | products.category_id |
-| category → category | 1:N self | parent_id |
-| order → items / payments / invoice / shipment | 1:N / 1:N / 1:1 / 1:1 | FKs |
-| user ↔ coupon | M:N | coupon_redemptions |
-| user ↔ product (wishlist) | M:N | wishlists |
-| user → referrals → rewards | 1:N → 1:N | referrals.referrer_id |
-| trade → portfolio_lot | 1:1 (buy) | portfolio_lots.source_id |
-| kyc_submission → documents | 1:N | kyc_documents |
-| broadcast → notifications | 1:N fan-out | notifications.type='broadcast' |
+| users → wallets | 1:2 (exactly irr + gold_mg) | `wallets.user_id` |
+| users → wallets → ledger | 1:n append-only | `wallet_ledger.wallet_id` |
+| users → kyc_profiles | 1:1 | `kyc_profiles.user_id UNIQUE` |
+| users → referred_by users | n:1 self-ref | `users.referred_by_id` |
+| categories → categories | 1:n (depth 2) | `categories.parent_id` |
+| products → categories | n:1 | `products.category_id` |
+| products ↔ files | 1:n ordered | `files.context_type='product'` |
+| carts → cart_lines → products | 1:n, line merges per product | `uniq(cart_id, product_id)` |
+| orders → order_items → products | 1:n with frozen snapshots | `order_items` |
+| orders ↔ shipments | 1:1 (delivery only) | `shipments.order_id UNIQUE` |
+| orders → payments | 1:n (attempts/refunds) | `payments.order_id` |
+| orders ↔ invoices | 1:1 on paid | `invoices.order_id UNIQUE` |
+| coupons ↔ orders | n:n via redemptions | `coupon_redemptions` |
+| users ↔ products (wishlist) | n:n pivot | `wishlist_items` |
+| trades ↔ trade_quotes | 1:1 on fill | `trades.quote_id UNIQUE` |
+| tickets → ticket_messages | 1:n thread | `ticket_messages.ticket_id` |
+| installment contracts → payments | 1:n | `installment_payments` |
 
 ## 4. Integrity & performance notes
 
-- **Money safety:** every balance change = one transaction inserting ledger row + `UPDATE wallets SET balance = balance ± amount` with `CHECK balance ≥ 0`; app-level row lock (`lockForUpdate`) on wallet row. No balance read without ledger reconciliation job (nightly `balance_after` drift check).
-- **Quote atomicity:** `trade_quotes.expires_at` checked inside confirm transaction (`WHERE id=? AND status='open' AND expires_at > NOW()` → affected 0 ⇒ 409 `QUOTE_EXPIRED`).
-- **Stock:** decrement with `WHERE stock_on_hand >= qty` guard ⇒ 409 `OUT_OF_STOCK`.
-- **Indexes for UI hot paths:** `wallet_ledgers(user_id, created_at)`, `orders(user_id, status)`, `spot_price_snapshots(karat, observed_at)`, `notifications(user_id, read_at)`, `products(status, type, karat)`.
-- **Partitioning:** `spot_price_snapshots` monthly (1Y chart scans ≤ 365×24×2 rows otherwise).
-- **Soft deletes:** users, products, coupons (restore endpoints), plus `orders` never deleted (cancelled status only).
+1. **Money moves only inside transactions** with `SELECT … FOR UPDATE` on both wallet rows (ordered by `wallet_id` to avoid deadlocks); ledger insert + balance update in the same TX.
+2. **Quote confirm race:** `UPDATE trade_quotes SET status='filled' WHERE id=? AND status='active' AND expires_at > NOW()` must affect 1 row, else `409 QUOTE_EXPIRED`.
+3. **Stock guard:** `UPDATE products SET reserved = reserved + ? WHERE id=? AND stock_on_hand - reserved >= ?` → 0 rows = `422` insufficient stock.
+4. `price_snapshots` is the hottest write path (~2 rows/min) — partition by month, keep 13 months online, archive beyond.
+5. Ledger `balance_after` enables O(1) balance-history reconstruction and nightly reconciliation against `wallets.balance`.
+6. Solvency ratio query: `(SELECT COALESCE(SUM(weight_mg),0) FROM vault_lots) * 1000 / NULLIF((SELECT COALESCE(SUM(balance),0) FROM wallets WHERE currency='gold_mg') + pending_delivery_mg, 0)` — materialize hourly into `solvency_snapshots` for the gauge history.
+7. Full-text search on products (`name, sku, description`) covers `q` until volume justifies Meilisearch.
+8. All Persian text columns use `utf8mb4_unicode_ci`; codes/numbers (`sku`, `code`, `number`) are ASCII with binary-unique indexes.
