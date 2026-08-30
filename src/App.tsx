@@ -20,6 +20,7 @@ import {
 import { StaffDashboardPage, StaffOrdersPage, StaffKycPage, StaffInventoryPage, StaffTicketsPage, StaffCustomersPage } from "./pages/staff";
 import { AdminDashboardPage, ReportsPage } from "./pages/admin-overview";
 import { AdminProductsPage, AdminCategoriesPage, AdminInventoryPage, AdminPricingPage } from "./pages/admin-catalog";
+import DocsPage from "./pages/docs";
 import {
   AdminOrdersPage, AdminPaymentsPage, AdminInvoicesPage, AdminCustomersPage,
   AdminWalletsPage, AdminPromotionsPage, AdminStaffPage, AdminSettingsPage, AdminBroadcastPage,
@@ -53,6 +54,9 @@ export default function App() {
               <Route path="/maintenance" element={<MaintenancePage />} />
               <Route path="*" element={<Error404Page />} />
             </Route>
+
+            {/* ---------- developer docs (standalone dark workspace) ---------- */}
+            <Route path="/docs" element={<DocsPage />} />
 
             {/* ---------- auth ---------- */}
             <Route path="/login" element={<LoginPage />} />
