@@ -1,6 +1,8 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
 
 @theme {
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --color-gold-50: #fbf6e8;
   --color-gold-100: #f4e9c8;
   --color-gold-200: #ead9a4;

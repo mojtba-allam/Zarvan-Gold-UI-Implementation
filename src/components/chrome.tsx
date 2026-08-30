@@ -40,6 +40,7 @@ const navLinks = [
   { to: "/size-guide", label: "راهنمای سایز" },
   { to: "/about", label: "درباره" },
   { to: "/faq", label: "سؤالات" },
+  { to: "/docs", label: "اسناد API" },
 ];
 
 export function StorefrontHeader() {
@@ -184,7 +185,7 @@ export function StorefrontFooter() {
       <div className="border-t border-cream-0/10">
         <div className="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-cream-0/45">
           <p>© ۱۴۰۵ شرکت طلای زرون (سهامی خاص) — کلیه حقوق محفوظ است.</p>
-          <p className="flex gap-4"><Link className="hover:text-gold-500 transition-colors" to="/faq">سؤالات متداول</Link><Link className="hover:text-gold-500 transition-colors" to="/contact">تماس با ما</Link><Link className="hover:text-gold-500 transition-colors" to="/about">قوانین</Link></p>
+          <p className="flex gap-4"><Link className="hover:text-gold-500 transition-colors" to="/faq">سؤالات متداول</Link><Link className="hover:text-gold-500 transition-colors" to="/contact">تماس با ما</Link><Link className="hover:text-gold-500 transition-colors" to="/about">قوانین</Link><Link className="hover:text-gold-500 transition-colors font-mono text-[10.5px]" to="/docs" dir="ltr">/docs — مستندات توسعه</Link></p>
         </div>
       </div>
     </footer>
